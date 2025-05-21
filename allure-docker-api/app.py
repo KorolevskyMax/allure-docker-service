@@ -26,6 +26,7 @@ from flask_jwt_extended import (
     get_jwt_identity, verify_jwt_in_request, get_jwt,
     set_access_cookies, set_refresh_cookies, unset_jwt_cookies
 )
+import threading
 
 dictConfig({
     'version': 1,
@@ -83,8 +84,6 @@ ENABLE_SECURITY_LOGIN = False
 MAKE_VIEWER_ENDPOINTS_PUBLIC = False
 SECURITY_USER = None
 SECURITY_PASS = None
-SECURITY_VIEWER_USER = None
-SECURITY_VIEWER_PASS = None
 USERS_INFO = {}
 ADMIN_ROLE_NAME = 'admin'
 VIEWER_ROLE_NAME = 'viewer'
@@ -144,6 +143,7 @@ RENDER_EMAIL_REPORT_PROCESS = '{}/renderEmailableReport.sh'.format(os.environ['R
 ALLURE_VERSION = os.environ['ALLURE_VERSION']
 STATIC_CONTENT = os.environ['STATIC_CONTENT']
 PROJECTS_DIRECTORY = os.environ['STATIC_CONTENT_PROJECTS']
+USERS_DIRECTORY = os.environ['STATIC_CONTENT_USERS']
 EMAILABLE_REPORT_FILE_NAME = os.environ['EMAILABLE_REPORT_FILE_NAME']
 ORIGIN = 'api'
 SECURITY_SPECS_PATH = 'swagger/security_specs'
@@ -156,6 +156,32 @@ GLOBAL_CSS = "https://stackpath.bootstrapcdn.com/bootswatch/4.3.1/cosmo/bootstra
 EMAILABLE_REPORT_CSS = GLOBAL_CSS
 EMAILABLE_REPORT_TITLE = "Emailable Report"
 API_RESPONSE_LESS_VERBOSE = 0
+
+USERS_FILE = os.path.join(USERS_DIRECTORY, 'users.json')
+USERS_LOCK = threading.Lock()
+
+def load_users_info():
+    global USERS_INFO
+    try:
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, 'r') as f:
+                USERS_INFO = json.load(f)
+        else:
+            USERS_INFO = {}
+    except Exception as ex:
+        LOGGER.error(f'Failed to load users info: {ex}')
+        USERS_INFO = {}
+
+def save_users_info():
+    try:
+        with USERS_LOCK:
+            with open(USERS_FILE, 'w') as f:
+                json.dump(USERS_INFO, f, indent=2)
+    except Exception as ex:
+        LOGGER.error(f'Failed to save users info: {ex}')
+
+# Загрузка пользователей при старте
+load_users_info()
 
 if "EMAILABLE_REPORT_CSS_CDN" in os.environ:
     EMAILABLE_REPORT_CSS = os.environ['EMAILABLE_REPORT_CSS_CDN']
@@ -250,40 +276,19 @@ if "SECURITY_PASS" in os.environ:
         SECURITY_PASS = SECURITY_PASS_TMP
         LOGGER.info('Setting SECURITY_PASS')
 
-if MAKE_VIEWER_ENDPOINTS_PUBLIC is False:
-    if "SECURITY_VIEWER_USER" in os.environ:
-        SECURITY_VIEWER_USER_TMP = os.environ['SECURITY_VIEWER_USER']
-        if SECURITY_VIEWER_USER_TMP and SECURITY_VIEWER_USER_TMP.strip():
-            SECURITY_VIEWER_USER = SECURITY_VIEWER_USER_TMP.lower()
-            LOGGER.info('Setting SECURITY_VIEWER_USER')
-
-    if "SECURITY_VIEWER_PASS" in os.environ:
-        SECURITY_VIEWER_PASS_TMP = os.environ['SECURITY_VIEWER_PASS']
-        if SECURITY_VIEWER_PASS_TMP and SECURITY_VIEWER_PASS_TMP.strip():
-            SECURITY_VIEWER_PASS = SECURITY_VIEWER_PASS_TMP
-            LOGGER.info('Setting SECURITY_VIEWER_PASS')
-
 if "SECURITY_ENABLED" in os.environ:
     try:
         ENABLE_SECURITY_LOGIN_TMP = int(os.environ['SECURITY_ENABLED'])
         if SECURITY_USER and SECURITY_PASS:
-            if SECURITY_USER != SECURITY_VIEWER_USER:
-                if ENABLE_SECURITY_LOGIN_TMP == 1:
-                    ENABLE_SECURITY_LOGIN = True
-                    LOGGER.info('Enabling Security Login. SECURITY_ENABLED=1')
-                    USERS_INFO[SECURITY_USER] = {
-                                                    'pass': SECURITY_PASS,
-                                                    'roles': [ADMIN_ROLE_NAME]
-                                                }
-                    if SECURITY_VIEWER_USER is not None and SECURITY_VIEWER_PASS is not None:
-                        USERS_INFO[SECURITY_VIEWER_USER] = {
-                                                                'pass': SECURITY_VIEWER_PASS,
-                                                                'roles': [VIEWER_ROLE_NAME]
-                                                           }
-                else:
-                    LOGGER.info('Setting SECURITY_ENABLED=0 by default')
+            if ENABLE_SECURITY_LOGIN_TMP == 1:
+                ENABLE_SECURITY_LOGIN = True
+                LOGGER.info('Enabling Security Login. SECURITY_ENABLED=1')
+                USERS_INFO[SECURITY_USER] = {
+                    'pass': SECURITY_PASS,
+                    'roles': [ADMIN_ROLE_NAME],
+                    'projects': ['*']  # '*' means all projects
+                }
             else:
-                LOGGER.info('SECURITY_USER and SECURITY_VIEWER_USER should be different')
                 LOGGER.info('Setting SECURITY_ENABLED=0 by default')
         else:
             LOGGER.info("To enable security you need SECURITY_USER' & 'SECURITY_PASS' env vars")
@@ -397,7 +402,7 @@ def generate_security_swagger_spec():
             data['paths']['/logout-refresh-token'] = security_specs['logout_refresh_spec.json']
             data['components']['schemas']['login'] = security_specs['login_scheme.json']
 
-            ensure_tags = ['Action', 'Project']
+            ensure_tags = ['Action', 'Project', 'Users']
             security_type = security_specs['security_type.json']
             security_401_response = security_specs['security_unauthorized_response.json']
             security_403_response = security_specs['security_forbidden_response.json']
@@ -597,6 +602,7 @@ def login_endpoint():
         resp = jsonify(json_body)
         set_access_cookies(resp, access_token)
         set_refresh_cookies(resp, refresh_token)
+        save_users_info()
         return resp, 200
     except Exception as ex:
         body = {
@@ -622,6 +628,7 @@ def logout_endpoint():
     try:
         jti = get_jwt()['jti']
         blacklist.add(jti)
+        save_users_info()
         return jsonify({'meta_data': {'message' : 'Successfully logged out'}}), 200
     except Exception as ex:
         body = {
@@ -649,6 +656,7 @@ def logout_refresh_token_endpoint():
         blacklist.add(jti)
         resp = jsonify({'meta_data': {'message' : 'Successfully logged out'}})
         unset_jwt_cookies(resp)
+        save_users_info()
         return resp, 200
     except Exception as ex:
         body = {
@@ -688,6 +696,7 @@ def refresh_endpoint():
         }
         resp = jsonify(json_body)
         set_access_cookies(resp, access_token)
+        save_users_info()
         return resp, 200
     except Exception as ex:
         body = {
@@ -855,8 +864,8 @@ def latest_report_endpoint():
 @jwt_required
 def send_results_endpoint(): #pylint: disable=too-many-branches
     try:
-        if check_admin_access(current_user) is False:
-            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        if not check_project_access(current_user, project_id):
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         content_type = str(request.content_type)
         if content_type is None:
@@ -944,6 +953,7 @@ def send_results_endpoint(): #pylint: disable=too-many-branches
         resp = jsonify(body)
         resp.status_code = 200
 
+    save_users_info()
     return resp
 
 @app.route("/generate-report", strict_slashes=False)
@@ -951,8 +961,8 @@ def send_results_endpoint(): #pylint: disable=too-many-branches
 @jwt_required
 def generate_report_endpoint():
     try:
-        if check_admin_access(current_user) is False:
-            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        if not check_project_access(current_user, project_id):
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         project_id = resolve_project(request.args.get('project_id'))
         if is_existent_project(project_id) is False:
@@ -1037,6 +1047,7 @@ def generate_report_endpoint():
         resp = jsonify(body)
         resp.status_code = 200
 
+    save_users_info()
     return resp
 
 @app.route("/clean-history", strict_slashes=False)
@@ -1044,8 +1055,8 @@ def generate_report_endpoint():
 @jwt_required
 def clean_history_endpoint():
     try:
-        if check_admin_access(current_user) is False:
-            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        if not check_project_access(current_user, project_id):
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         project_id = resolve_project(request.args.get('project_id'))
         if is_existent_project(project_id) is False:
@@ -1078,6 +1089,7 @@ def clean_history_endpoint():
         resp = jsonify(body)
         resp.status_code = 200
 
+    save_users_info()
     return resp
 
 @app.route("/clean-results", strict_slashes=False)
@@ -1085,8 +1097,8 @@ def clean_history_endpoint():
 @jwt_required
 def clean_results_endpoint():
     try:
-        if check_admin_access(current_user) is False:
-            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        if not check_project_access(current_user, project_id):
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         project_id = resolve_project(request.args.get('project_id'))
         if is_existent_project(project_id) is False:
@@ -1120,6 +1132,7 @@ def clean_results_endpoint():
         resp = jsonify(body)
         resp.status_code = 200
 
+    save_users_info()
     return resp
 
 @app.route("/emailable-report/render", strict_slashes=False)
@@ -1137,6 +1150,9 @@ def emailable_report_render_endpoint():
             resp = jsonify(body)
             resp.status_code = 404
             return resp
+
+        if not check_project_access(current_user, project_id):
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         check_process(GENERATE_REPORT_PROCESS, project_id)
 
@@ -1200,6 +1216,9 @@ def emailable_report_export_endpoint():
             resp.status_code = 404
             return resp
 
+        if not check_project_access(current_user, project_id):
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
+
         check_process(GENERATE_REPORT_PROCESS, project_id)
 
         project_path = get_project_path(project_id)
@@ -1235,6 +1254,9 @@ def report_export_endpoint():
             resp = jsonify(body)
             resp.status_code = 404
             return resp
+
+        if not check_project_access(current_user, project_id):
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         check_process(GENERATE_REPORT_PROCESS, project_id)
 
@@ -1275,8 +1297,8 @@ def report_export_endpoint():
 @jwt_required
 def create_project_endpoint():
     try:
-        if check_admin_access(current_user) is False:
-            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        if ADMIN_ROLE_NAME not in current_user.roles:
+            return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
 
         if not request.is_json:
             raise Exception("Header 'Content-Type' is not 'application/json'")
@@ -1308,11 +1330,14 @@ def create_project_endpoint():
 @jwt_required
 def delete_project_endpoint(project_id):
     try:
-        if check_admin_access(current_user) is False:
-            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        if ADMIN_ROLE_NAME not in current_user.roles:
+            return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
 
-        if project_id == 'default':
-            raise Exception("You must not remove project_id 'default'. Try with other projects")
+        if not check_project_access(current_user, project_id):
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
+
+        # if project_id == 'default':
+            # raise Exception("You must not remove project_id 'default'. Try with other projects")
 
         if is_existent_project(project_id) is False:
             body = {
@@ -1342,6 +1367,7 @@ def delete_project_endpoint(project_id):
         }
         resp = jsonify(body)
         resp.status_code = 200
+    save_users_info()
     return resp
 
 @app.route('/projects/<project_id>', strict_slashes=False)
@@ -1358,6 +1384,9 @@ def get_project_endpoint(project_id):
             resp = jsonify(body)
             resp.status_code = 404
             return resp
+
+        if not check_project_access(current_user, project_id):
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         project_reports_path = '{}/reports'.format(get_project_path(project_id))
         reports_entity = []
@@ -1417,7 +1446,18 @@ def get_project_endpoint(project_id):
 def get_projects_endpoint():
     try:
         projects_dirs = os.listdir(PROJECTS_DIRECTORY)
-        projects = get_projects(projects_dirs)
+        # Проверка доступа
+        if ADMIN_ROLE_NAME in current_user.roles:
+            allowed_projects = projects_dirs
+        else:
+            allowed_projects = getattr(current_user, 'projects', None)
+            if allowed_projects is None:
+                allowed_projects = USERS_INFO[current_user.username].get('projects', [])
+            if '*' in allowed_projects:
+                allowed_projects = projects_dirs
+            else:
+                allowed_projects = [p for p in projects_dirs if p in allowed_projects]
+        projects = get_projects(allowed_projects)
 
         body = {
             'data': {
@@ -1450,7 +1490,19 @@ def get_projects_search_endpoint():
             raise Exception("'id' query parameter is required")
 
         project_id = project_id.lower()
-        projects_filtered = get_projects_filtered_by_id(project_id, os.listdir(PROJECTS_DIRECTORY))
+        projects_dirs = os.listdir(PROJECTS_DIRECTORY)
+        # Проверка доступа
+        if ADMIN_ROLE_NAME in current_user.roles:
+            allowed_projects = projects_dirs
+        else:
+            allowed_projects = getattr(current_user, 'projects', None)
+            if allowed_projects is None:
+                allowed_projects = USERS_INFO[current_user.username].get('projects', [])
+            if '*' in allowed_projects:
+                allowed_projects = projects_dirs
+            else:
+                allowed_projects = [p for p in projects_dirs if p in allowed_projects]
+        projects_filtered = get_projects_filtered_by_id(project_id, allowed_projects)
         projects = get_projects(projects_filtered)
 
         if len(projects) == 0:
@@ -1482,6 +1534,21 @@ def get_projects_search_endpoint():
 @jwt_required
 def get_reports_endpoint(project_id, path):
     try:
+        # Проверка доступа
+        projects_dirs = os.listdir(PROJECTS_DIRECTORY)
+        if ADMIN_ROLE_NAME in current_user.roles:
+            allowed_projects = projects_dirs
+        else:
+            allowed_projects = getattr(current_user, 'projects', None)
+            if allowed_projects is None:
+                allowed_projects = USERS_INFO[current_user.username].get('projects', [])
+            if '*' in allowed_projects:
+                allowed_projects = projects_dirs
+            else:
+                allowed_projects = [p for p in projects_dirs if p in allowed_projects]
+        if project_id not in allowed_projects:
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
+
         project_path = '{}/reports/{}'.format(project_id, path)
         return send_from_directory(PROJECTS_DIRECTORY, project_path)
     except Exception:
@@ -1635,27 +1702,268 @@ def resolve_project(project_id_param):
         project_id = project_id_param
     return project_id
 
-def check_admin_access(user):
-    if ENABLE_SECURITY_LOGIN is False:
+def check_project_access(user, project_id):
+    if ADMIN_ROLE_NAME in user.roles:
         return True
+    allowed_projects = getattr(user, 'projects', None)
+    if allowed_projects is None:
+        allowed_projects = USERS_INFO[user.username].get('projects', [])
+    return '*' in allowed_projects or project_id in allowed_projects
 
-    return check_access(ADMIN_ROLE_NAME, user)
+@app.route('/users', methods=['POST'], strict_slashes=False)
+@app.route("/allure-docker-service/users", methods=['POST'], strict_slashes=False)
+@jwt_required
+def create_user_endpoint():
+    try:
+        # Check if current user is admin
+        if ADMIN_ROLE_NAME not in current_user.roles:
+            return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
 
-def check_access(role, user):
-    if user.roles is None:
-        return False
+        if not request.is_json:
+            raise Exception("Header 'Content-Type' is not 'application/json'")
 
-    if role in user.roles:
-        return True
+        data = request.get_json()
+        
+        # Validate required fields
+        if not data.get('username') or not data.get('password') or not data.get('roles'):
+            raise Exception("Missing required fields: username, password, roles")
 
-    return False
+        username = data['username'].lower()
+        password = data['password']
+        roles = data['roles']
+        projects = data.get('projects', [])
 
-def check_process(process_file, project_id):
-    tmp = os.popen('ps -Af | grep -w {}'.format(project_id)).read()
-    proccount = tmp.count(process_file)
+        # Validate username format and length
+        if not re.match('^[a-z0-9_-]+$', username):
+            raise Exception("Username must contain only lowercase letters, numbers, underscores and hyphens")
+        if len(username) < 3 or len(username) > 32:
+            raise Exception("Username must be between 3 and 32 characters")
 
-    if proccount > 0:
-        raise Exception("Processing files for project_id '{}'. Try later!".format(project_id))
+        # Check if username already exists
+        if username in USERS_INFO:
+            raise Exception(f"Username '{username}' already exists")
+
+        # Validate roles
+        if not all(role == VIEWER_ROLE_NAME for role in roles):
+            raise Exception("Only 'viewer' role is allowed for new users")
+
+        # Create new user
+        USERS_INFO[username] = {
+            'pass': password,
+            'roles': roles,
+            'projects': projects
+        }
+
+        save_users_info()
+        return jsonify({
+            'data': {
+                'username': username,
+                'roles': roles,
+                'projects': projects
+            },
+            'meta_data': {
+                'message': 'User created successfully'
+            }
+        }), 201
+
+    except Exception as ex:
+        return jsonify({
+            'meta_data': {
+                'message': str(ex)
+            }
+        }), 400
+
+@app.route('/users', methods=['GET'], strict_slashes=False)
+@app.route("/allure-docker-service/users", methods=['GET'], strict_slashes=False)
+@jwt_required
+def list_users_endpoint():
+    try:
+        # Check if current user is admin
+        if ADMIN_ROLE_NAME not in current_user.roles:
+            return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
+
+        users = []
+        for username, info in USERS_INFO.items():
+            users.append({
+                'username': username,
+                'roles': info['roles'],
+                'projects': info.get('projects', [])
+            })
+
+        return jsonify({
+            'data': {
+                'users': users
+            },
+            'meta_data': {
+                'message': 'Users retrieved successfully'
+            }
+        }), 200
+
+    except Exception as ex:
+        return jsonify({
+            'meta_data': {
+                'message': str(ex)
+            }
+        }), 400
+
+@app.route('/users/<username>', methods=['GET'], strict_slashes=False)
+@app.route("/allure-docker-service/users/<username>", methods=['GET'], strict_slashes=False)
+@jwt_required
+def get_user_endpoint(username):
+    try:
+        # Check if current user is admin
+        if ADMIN_ROLE_NAME not in current_user.roles:
+            return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
+
+        username = username.lower()
+        if username not in USERS_INFO:
+            return jsonify({'meta_data': {'message': 'User not found'}}), 404
+
+        user_info = USERS_INFO[username]
+        return jsonify({
+            'data': {
+                'username': username,
+                'roles': user_info['roles'],
+                'projects': user_info.get('projects', [])
+            },
+            'meta_data': {
+                'message': 'User details retrieved successfully'
+            }
+        }), 200
+
+    except Exception as ex:
+        return jsonify({
+            'meta_data': {
+                'message': str(ex)
+            }
+        }), 400
+
+@app.route('/users/<username>', methods=['PUT'], strict_slashes=False)
+@app.route("/allure-docker-service/users/<username>", methods=['PUT'], strict_slashes=False)
+@jwt_required
+def update_user_endpoint(username):
+    try:
+        # Check if current user is admin
+        if ADMIN_ROLE_NAME not in current_user.roles:
+            return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
+
+        if not request.is_json:
+            raise Exception("Header 'Content-Type' is not 'application/json'")
+
+        username = username.lower()
+        if username not in USERS_INFO:
+            return jsonify({'meta_data': {'message': 'User not found'}}), 404
+
+        data = request.get_json()
+        user_info = USERS_INFO[username]
+
+        # Update password if provided
+        if 'password' in data:
+            user_info['pass'] = data['password']
+
+        # Update roles if provided
+        if 'roles' in data:
+            roles = data['roles']
+            if not all(role == VIEWER_ROLE_NAME for role in roles):
+                raise Exception("Only 'viewer' role is allowed")
+            user_info['roles'] = roles
+
+        # Update projects if provided
+        if 'projects' in data:
+            user_info['projects'] = data['projects']
+
+        save_users_info()
+        return jsonify({
+            'data': {
+                'username': username,
+                'roles': user_info['roles'],
+                'projects': user_info.get('projects', [])
+            },
+            'meta_data': {
+                'message': 'User updated successfully'
+            }
+        }), 200
+
+    except Exception as ex:
+        return jsonify({
+            'meta_data': {
+                'message': str(ex)
+            }
+        }), 400
+
+@app.route('/users/<username>', methods=['DELETE'], strict_slashes=False)
+@app.route("/allure-docker-service/users/<username>", methods=['DELETE'], strict_slashes=False)
+@jwt_required
+def delete_user_endpoint(username):
+    try:
+        # Check if current user is admin
+        if ADMIN_ROLE_NAME not in current_user.roles:
+            return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
+
+        username = username.lower()
+        if username not in USERS_INFO:
+            return jsonify({'meta_data': {'message': 'User not found'}}), 404
+
+        # Don't allow deleting the admin user
+        if ADMIN_ROLE_NAME in USERS_INFO[username]['roles']:
+            return jsonify({'meta_data': {'message': 'Cannot delete admin user'}}), 403
+
+        del USERS_INFO[username]
+        save_users_info()
+
+        return jsonify({
+            'meta_data': {
+                'message': 'User deleted successfully'
+            }
+        }), 200
+
+    except Exception as ex:
+        return jsonify({
+            'meta_data': {
+                'message': str(ex)
+            }
+        }), 400
+
+@app.route('/users/<username>/projects', methods=['PUT'], strict_slashes=False)
+@app.route("/allure-docker-service/users/<username>/projects", methods=['PUT'], strict_slashes=False)
+@jwt_required
+def update_user_projects_endpoint(username):
+    try:
+        # Check if current user is admin
+        if ADMIN_ROLE_NAME not in current_user.roles:
+            return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
+
+        if not request.is_json:
+            raise Exception("Header 'Content-Type' is not 'application/json'")
+
+        username = username.lower()
+        if username not in USERS_INFO:
+            return jsonify({'meta_data': {'message': 'User not found'}}), 404
+
+        data = request.get_json()
+        if 'projects' not in data:
+            raise Exception("Missing required field: projects")
+
+        # Update user's project permissions
+        USERS_INFO[username]['projects'] = data['projects']
+        save_users_info()
+
+        return jsonify({
+            'data': {
+                'username': username,
+                'projects': USERS_INFO[username]['projects']
+            },
+            'meta_data': {
+                'message': 'User project permissions updated successfully'
+            }
+        }), 200
+
+    except Exception as ex:
+        return jsonify({
+            'meta_data': {
+                'message': str(ex)
+            }
+        }), 400
 
 if __name__ == '__main__':
     if DEV_MODE == 1:

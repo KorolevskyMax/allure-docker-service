@@ -29,6 +29,10 @@
       {
          "name":"Project",
          "description":""
+      },
+      {
+         "name":"User Management",
+         "description":"User and permission management endpoints (admin only)"
       }
    ],
    "paths":{
@@ -706,6 +710,269 @@
                }
             }
          }
+      },
+      "/users":{
+         "post":{
+            "tags":[
+               "Users"
+            ],
+            "summary":"Create a new user (admin only)",
+            "description":"Create a new user with specified role and project permissions",
+            "security":[
+               {
+                  "bearerAuth":[]
+               }
+            ],
+            "requestBody":{
+               "required":true,
+               "content":{
+                  "application/json":{
+                     "schema":{
+                        "$ref":"#/components/schemas/createUser"
+                     },
+                     "example":{
+                        "username":"newuser",
+                        "password":"userpass123",
+                        "roles":["viewer"],
+                        "projects":["project1", "project2"]
+                     }
+                  }
+               }
+            },
+            "responses":{
+               "201":{
+                  "description":"User created successfully",
+                  "content":{
+                     "application/json":{
+                        "schema":{
+                           "$ref":"#/components/schemas/userResponse"
+                        }
+                     }
+                  }
+               },
+               "400":{
+                  "description":"Invalid input",
+                  "content":{
+                     "application/json":{
+                        "schema":{
+                           "$ref":"#/components/schemas/errorResponse"
+                        }
+                     }
+                  }
+               },
+               "403":{
+                  "description":"Forbidden - Admin access required",
+                  "content":{
+                     "application/json":{
+                        "schema":{
+                           "$ref":"#/components/schemas/errorResponse"
+                        }
+                     }
+                  }
+               }
+            }
+         },
+         "get":{
+            "tags":[
+               "Users"
+            ],
+            "summary":"List all users (admin only)",
+            "security":[
+               {
+                  "bearerAuth":[]
+               }
+            ],
+            "responses":{
+               "200":{
+                  "description":"List of users",
+                  "content":{
+                     "application/json":{
+                        "schema":{
+                           "type":"array",
+                           "items":{
+                              "$ref":"#/components/schemas/userResponse"
+                           }
+                        }
+                     }
+                  }
+               },
+               "403":{
+                  "description":"Forbidden - Admin access required"
+               }
+            }
+         }
+      },
+      "/users/{username}":{
+         "get":{
+            "tags":[
+               "Users"
+            ],
+            "summary":"Get user details (admin only)",
+            "parameters":[
+               {
+                  "name":"username",
+                  "in":"path",
+                  "required":true,
+                  "schema":{
+                     "type":"string"
+                  }
+               }
+            ],
+            "security":[
+               {
+                  "bearerAuth":[]
+               }
+            ],
+            "responses":{
+               "200":{
+                  "description":"User details",
+                  "content":{
+                     "application/json":{
+                        "schema":{
+                           "$ref":"#/components/schemas/userResponse"
+                        }
+                     }
+                  }
+               },
+               "404":{
+                  "description":"User not found"
+               },
+               "403":{
+                  "description":"Forbidden - Admin access required"
+               }
+            }
+         },
+         "put":{
+            "tags":[
+               "Users"
+            ],
+            "summary":"Update user (admin only)",
+            "parameters":[
+               {
+                  "name":"username",
+                  "in":"path",
+                  "required":true,
+                  "schema":{
+                     "type":"string"
+                  }
+               }
+            ],
+            "security":[
+               {
+                  "bearerAuth":[]
+               }
+            ],
+            "requestBody":{
+               "required":true,
+               "content":{
+                  "application/json":{
+                     "schema":{
+                        "$ref":"#/components/schemas/updateUser"
+                     }
+                  }
+               }
+            },
+            "responses":{
+               "200":{
+                  "description":"User updated successfully",
+                  "content":{
+                     "application/json":{
+                        "schema":{
+                           "$ref":"#/components/schemas/userResponse"
+                        }
+                     }
+                  }
+               },
+               "400":{
+                  "description":"Invalid input"
+               },
+               "404":{
+                  "description":"User not found"
+               },
+               "403":{
+                  "description":"Forbidden - Admin access required"
+               }
+            }
+         },
+         "delete":{
+            "tags":[
+               "Users"
+            ],
+            "summary":"Delete user (admin only)",
+            "parameters":[
+               {
+                  "name":"username",
+                  "in":"path",
+                  "required":true,
+                  "schema":{
+                     "type":"string"
+                  }
+               }
+            ],
+            "security":[
+               {
+                  "bearerAuth":[]
+               }
+            ],
+            "responses":{
+               "200":{
+                  "description":"User deleted successfully"
+               },
+               "404":{
+                  "description":"User not found"
+               },
+               "403":{
+                  "description":"Forbidden - Admin access required"
+               }
+            }
+         }
+      },
+      "/users/{username}/projects":{
+         "put":{
+            "tags":[
+               "Users"
+            ],
+            "summary":"Update user project permissions (admin only)",
+            "parameters":[
+               {
+                  "name":"username",
+                  "in":"path",
+                  "required":true,
+                  "schema":{
+                     "type":"string"
+                  }
+               }
+            ],
+            "security":[
+               {
+                  "bearerAuth":[]
+               }
+            ],
+            "requestBody":{
+               "required":true,
+               "content":{
+                  "application/json":{
+                     "schema":{
+                        "$ref":"#/components/schemas/updateUserProjects"
+                     }
+                  }
+               }
+            },
+            "responses":{
+               "200":{
+                  "description":"Project permissions updated successfully"
+               },
+               "400":{
+                  "description":"Invalid input"
+               },
+               "404":{
+                  "description":"User not found"
+               },
+               "403":{
+                  "description":"Forbidden - Admin access required"
+               }
+            }
+         }
       }
    },
    "components":{
@@ -780,6 +1047,106 @@
                      "type":"string",
                      "format":"binary"
                   }
+               }
+            }
+         },
+         "createUser":{
+            "type":"object",
+            "required":[
+               "username",
+               "password",
+               "roles"
+            ],
+            "properties":{
+               "username":{
+                  "type":"string",
+                  "description":"Username for the new user"
+               },
+               "password":{
+                  "type":"string",
+                  "description":"Password for the new user"
+               },
+               "roles":{
+                  "type":"array",
+                  "items":{
+                     "type":"string",
+                     "enum":["viewer"]
+                  },
+                  "description":"User roles (only viewer role is allowed for new users)"
+               },
+               "projects":{
+                  "type":"array",
+                  "items":{
+                     "type":"string"
+                  },
+                  "description":"List of project IDs the user has access to"
+               }
+            }
+         },
+         "updateUser":{
+            "type":"object",
+            "properties":{
+               "password":{
+                  "type":"string",
+                  "description":"New password for the user"
+               },
+               "roles":{
+                  "type":"array",
+                  "items":{
+                     "type":"string",
+                     "enum":["viewer"]
+                  },
+                  "description":"User roles (only viewer role is allowed)"
+               },
+               "projects":{
+                  "type":"array",
+                  "items":{
+                     "type":"string"
+                  },
+                  "description":"List of project IDs the user has access to"
+               }
+            }
+         },
+         "updateUserProjects":{
+            "type":"object",
+            "required":[
+               "projects"
+            ],
+            "properties":{
+               "projects":{
+                  "type":"array",
+                  "items":{
+                     "type":"string"
+                  },
+                  "description":"List of project IDs the user has access to"
+               }
+            }
+         },
+         "userResponse":{
+            "type":"object",
+            "properties":{
+               "username":{
+                  "type":"string"
+               },
+               "roles":{
+                  "type":"array",
+                  "items":{
+                     "type":"string"
+                  }
+               },
+               "projects":{
+                  "type":"array",
+                  "items":{
+                     "type":"string"
+                  }
+               }
+            }
+         },
+         "errorResponse":{
+            "type":"object",
+            "properties":{
+               "message":{
+                  "type":"string"
                }
             }
          }

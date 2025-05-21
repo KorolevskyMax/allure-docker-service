@@ -50,7 +50,7 @@ LABEL org.label-schema.build-date=${BUILD_DATE} \
     org.label-schema.vcs-type="Git" \
     org.label-schema.vcs-url="https://github.com/fescobar/allure-docker-service" \
     org.label-schema.arch=${ARCH} \
-    authors="Frank Escobar <fescobar.systems@gmail.com>, Raymond Mouthaan <raymondmmouthaan@gmail.com>"
+    authors="Frank Escobar <fescobar.systems@gmail.com>, Raymond Mouthaan <raymondmmouthaan@gmail.com>, Korolevsky Max <max.korolevsky@say.games>"
 
 # QEMU - Quick Emulation
 COPY tmp/qemu-$QEMU_ARCH-static /usr/bin/qemu-$QEMU_ARCH-static
@@ -95,6 +95,7 @@ ENV ALLURE_VERSION=$ROOT/version
 ENV EMAILABLE_REPORT_FILE_NAME='emailable-report-allure-docker-service.html'
 ENV STATIC_CONTENT=$ROOT/allure-docker-api/static
 ENV STATIC_CONTENT_PROJECTS=$STATIC_CONTENT/projects
+ENV STATIC_CONTENT_USERS=$STATIC_CONTENT/users
 ENV DEFAULT_PROJECT=default
 ENV DEFAULT_PROJECT_ROOT=$STATIC_CONTENT_PROJECTS/$DEFAULT_PROJECT
 ENV DEFAULT_PROJECT_RESULTS=$DEFAULT_PROJECT_ROOT/results
@@ -104,8 +105,10 @@ ENV EXECUTOR_FILENAME=executor.json
 RUN echo -n $(allure --version) > ${ALLURE_VERSION} && \
     echo "ALLURE_VERSION: "$(cat ${ALLURE_VERSION}) && \
     mkdir $ALLURE_HOME_SL && \
+    mkdir $STATIC_CONTENT_USERS && \
     ln -s $ALLURE_HOME/* $ALLURE_HOME_SL && \
     ln -s $STATIC_CONTENT_PROJECTS $ROOT/projects && \
+    ln -s $STATIC_CONTENT_USERS $ROOT/users && \
     ln -s $DEFAULT_PROJECT_REPORTS $ROOT/default-reports
 
 WORKDIR $ROOT
