@@ -125,6 +125,8 @@ RUN chmod +x $ROOT/*.sh && \
     cp /tmp/resources/styles.css $ALLURE_RESOURCES
 
 RUN chown -R allure:allure $ROOT
+RUN chown -R allure:allure $STATIC_CONTENT_USERS
+RUN chown -R allure:allure $STATIC_CONTENT_PROJECTS
 
 VOLUME [ "$RESULTS_DIRECTORY" ]
 
