@@ -26,7 +26,8 @@ from flask_jwt_extended import (
     get_jwt_identity, verify_jwt_in_request, get_jwt,
     set_access_cookies, set_refresh_cookies, unset_jwt_cookies
 )
-import threading
+import sqlite3
+from werkzeug.security import generate_password_hash, check_password_hash
 
 dictConfig({
     'version': 1,
@@ -157,26 +158,113 @@ EMAILABLE_REPORT_CSS = GLOBAL_CSS
 EMAILABLE_REPORT_TITLE = "Emailable Report"
 API_RESPONSE_LESS_VERBOSE = 0
 
-USERS_FILE = os.path.join(USERS_DIRECTORY, 'users.json')
-USERS_LOCK = threading.Lock()
+USERS_DB_FILE = os.path.join(USERS_DIRECTORY, 'users.db')
+
+# --- Синглтон для управления соединением с SQLite ---
+class SQLiteDB:
+    _instance = None
+    _conn = None
+
+    def __new__(cls, db_path):
+        if cls._instance is None:
+            cls._instance = super(SQLiteDB, cls).__new__(cls)
+            cls._conn = sqlite3.connect(db_path, check_same_thread=False)
+        return cls._instance
+
+    @property
+    def conn(self):
+        return self._conn
+
+    def close(self):
+        if self._conn:
+            self._conn.close()
+            self._conn = None
+            SQLiteDB._instance = None
+
+# --- Получение синглтон-коннекшена ---
+def get_db_conn():
+    return SQLiteDB(USERS_DB_FILE).conn
+
+# --- Функции работы с пользователями через синглтон ---
+def db_get_user(username):
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('SELECT username, password_hash, roles, projects FROM users WHERE username=?', (username,))
+    row = c.fetchone()
+    if row:
+        return {
+            'username': row[0],
+            'password_hash': row[1],
+            'roles': json.loads(row[2]),
+            'projects': json.loads(row[3])
+        }
+    return None
+
+def db_create_user(username, password, roles, projects):
+    conn = get_db_conn()
+    c = conn.cursor()
+    password_hash = generate_password_hash(password)
+    c.execute('INSERT INTO users (username, password_hash, roles, projects) VALUES (?, ?, ?, ?)',
+              (username, password_hash, json.dumps(roles), json.dumps(projects)))
+    conn.commit()
+
+def db_update_user(username, password=None, roles=None, projects=None):
+    conn = get_db_conn()
+    c = conn.cursor()
+    user = db_get_user(username)
+    if not user:
+        return False
+    new_password_hash = user['password_hash']
+    if password:
+        new_password_hash = generate_password_hash(password)
+    new_roles = user['roles'] if roles is None else roles
+    new_projects = user['projects'] if projects is None else projects
+    c.execute('UPDATE users SET password_hash=?, roles=?, projects=? WHERE username=?',
+              (new_password_hash, json.dumps(new_roles), json.dumps(new_projects), username))
+    conn.commit()
+    return True
+
+def db_delete_user(username):
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('DELETE FROM users WHERE username=?', (username,))
+    conn.commit()
+
+def db_list_users():
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('SELECT username, roles, projects FROM users')
+    rows = c.fetchall()
+    return [
+        {
+            'username': row[0],
+            'roles': json.loads(row[1]),
+            'projects': json.loads(row[2])
+        } for row in rows
+    ]
+
+def db_check_password(username, password):
+    user = db_get_user(username)
+    if not user:
+        return False
+    return check_password_hash(user['password_hash'], password)
 
 def load_users_info():
     global USERS_INFO
     try:
-        if os.path.exists(USERS_FILE):
-            with open(USERS_FILE, 'r') as f:
-                USERS_INFO = json.load(f)
+        if os.path.exists(USERS_DB_FILE):
+            USERS_INFO = db_list_users()
         else:
-            USERS_INFO = {}
+            USERS_INFO = []
     except Exception as ex:
         LOGGER.error(f'Failed to load users info: {ex}')
-        USERS_INFO = {}
+        USERS_INFO = []
 
 def save_users_info():
     try:
-        with USERS_LOCK:
-            with open(USERS_FILE, 'w') as f:
-                json.dump(USERS_INFO, f, indent=2)
+        if os.path.exists(USERS_DB_FILE):
+            for user in USERS_INFO:
+                db_update_user(user['username'], None, user['roles'], user['projects'])
     except Exception as ex:
         LOGGER.error(f'Failed to save users info: {ex}')
 
@@ -283,11 +371,12 @@ if "SECURITY_ENABLED" in os.environ:
             if ENABLE_SECURITY_LOGIN_TMP == 1:
                 ENABLE_SECURITY_LOGIN = True
                 LOGGER.info('Enabling Security Login. SECURITY_ENABLED=1')
-                USERS_INFO[SECURITY_USER] = {
-                    'pass': SECURITY_PASS,
+                USERS_INFO.append({
+                    'username': SECURITY_USER,
+                    'password_hash': generate_password_hash(SECURITY_PASS),
                     'roles': [ADMIN_ROLE_NAME],
                     'projects': ['*']  # '*' means all projects
-                }
+                })
             else:
                 LOGGER.info('Setting SECURITY_ENABLED=0 by default')
         else:
@@ -521,13 +610,20 @@ def jwt_refresh_token_required(fn): #pylint: disable=invalid-name, function-rede
 @jwt.user_lookup_loader
 def user_loader_callback(jwt_header, jwt_data):
     identity = jwt_data['sub']
-    if identity not in USERS_INFO:
+    user = db_get_user(identity)
+    if not user:
         return None
     return UserAccess(
         username=identity,
-        roles=USERS_INFO[identity]['roles']
+        roles=user['roles']
     )
-### end Security Section
+
+def check_project_access(user, project_id):
+    if ADMIN_ROLE_NAME in user.roles:
+        return True
+    db_user = db_get_user(user.username)
+    allowed_projects = db_user['projects'] if db_user else []
+    return '*' in allowed_projects or project_id in allowed_projects
 
 ### CORS section
 @app.after_request
@@ -556,16 +652,12 @@ def after_request_func(response):
 def login_endpoint():
     try:
         if ENABLE_SECURITY_LOGIN is False:
-            body = {
-                'meta_data': {
-                    'message' : 'SECURITY is not enabled'
-                }
-            }
+            body = {'meta_data': {'message': 'SECURITY is not enabled'}}
             resp = jsonify(body)
             return resp, 404
 
         content_type = str(request.content_type)
-        if content_type is None and content_type.startswith('application/json') is False:
+        if content_type is None or not content_type.startswith('application/json'):
             raise Exception("Header 'Content-Type' must be 'application/json'")
 
         if not request.is_json:
@@ -576,15 +668,13 @@ def login_endpoint():
             raise Exception("Missing 'username' attribute")
         username = username.lower()
 
-        if username not in USERS_INFO:
-            return jsonify({'meta_data': {'message' : 'Invalid username/password'}}), 401
-
         password = request.json.get('password', None)
         if not password:
             raise Exception("Missing 'password' attribute")
 
-        if USERS_INFO[username]['pass'] != password:
-            return jsonify({'meta_data': {'message' : 'Invalid username/password'}}), 401
+        user = db_get_user(username)
+        if not user or not db_check_password(username, password):
+            return jsonify({'meta_data': {'message': 'Invalid username/password'}}), 401
 
         access_token = create_access_token(identity=username)
         refresh_token = create_refresh_token(identity=username)
@@ -595,21 +685,16 @@ def login_endpoint():
                 'access_token': access_token,
                 'refresh_token': refresh_token,
                 'expires_in': expires_in,
-                'roles': USERS_INFO[username]['roles']
+                'roles': user['roles']
             },
-            'meta_data': {'message' : 'Successfully logged'}
+            'meta_data': {'message': 'Successfully logged'}
         }
         resp = jsonify(json_body)
         set_access_cookies(resp, access_token)
         set_refresh_cookies(resp, refresh_token)
-        save_users_info()
         return resp, 200
     except Exception as ex:
-        body = {
-            'meta_data': {
-                'message' : str(ex)
-            }
-        }
+        body = {'meta_data': {'message': str(ex)}}
         resp = jsonify(body)
         return resp, 400
 
@@ -1702,59 +1787,31 @@ def resolve_project(project_id_param):
         project_id = project_id_param
     return project_id
 
-def check_project_access(user, project_id):
-    if ADMIN_ROLE_NAME in user.roles:
-        return True
-    allowed_projects = getattr(user, 'projects', None)
-    if allowed_projects is None:
-        allowed_projects = USERS_INFO[user.username].get('projects', [])
-    return '*' in allowed_projects or project_id in allowed_projects
-
 @app.route('/users', methods=['POST'], strict_slashes=False)
 @app.route("/allure-docker-service/users", methods=['POST'], strict_slashes=False)
 @jwt_required
 def create_user_endpoint():
     try:
-        # Check if current user is admin
         if ADMIN_ROLE_NAME not in current_user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
-
         if not request.is_json:
             raise Exception("Header 'Content-Type' is not 'application/json'")
-
         data = request.get_json()
-        
-        # Validate required fields
         if not data.get('username') or not data.get('password') or not data.get('roles'):
             raise Exception("Missing required fields: username, password, roles")
-
         username = data['username'].lower()
         password = data['password']
         roles = data['roles']
         projects = data.get('projects', [])
-
-        # Validate username format and length
         if not re.match('^[a-z0-9_-]+$', username):
             raise Exception("Username must contain only lowercase letters, numbers, underscores and hyphens")
         if len(username) < 3 or len(username) > 32:
             raise Exception("Username must be between 3 and 32 characters")
-
-        # Check if username already exists
-        if username in USERS_INFO:
+        if db_get_user(username):
             raise Exception(f"Username '{username}' already exists")
-
-        # Validate roles
         if not all(role == VIEWER_ROLE_NAME for role in roles):
             raise Exception("Only 'viewer' role is allowed for new users")
-
-        # Create new user
-        USERS_INFO[username] = {
-            'pass': password,
-            'roles': roles,
-            'projects': projects
-        }
-
-        save_users_info()
+        db_create_user(username, password, roles, projects)
         return jsonify({
             'data': {
                 'username': username,
@@ -1765,31 +1822,17 @@ def create_user_endpoint():
                 'message': 'User created successfully'
             }
         }), 201
-
     except Exception as ex:
-        return jsonify({
-            'meta_data': {
-                'message': str(ex)
-            }
-        }), 400
+        return jsonify({'meta_data': {'message': str(ex)}}), 400
 
 @app.route('/users', methods=['GET'], strict_slashes=False)
 @app.route("/allure-docker-service/users", methods=['GET'], strict_slashes=False)
 @jwt_required
 def list_users_endpoint():
     try:
-        # Check if current user is admin
         if ADMIN_ROLE_NAME not in current_user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
-
-        users = []
-        for username, info in USERS_INFO.items():
-            users.append({
-                'username': username,
-                'roles': info['roles'],
-                'projects': info.get('projects', [])
-            })
-
+        users = db_list_users()
         return jsonify({
             'data': {
                 'users': users
@@ -1798,172 +1841,155 @@ def list_users_endpoint():
                 'message': 'Users retrieved successfully'
             }
         }), 200
-
     except Exception as ex:
-        return jsonify({
-            'meta_data': {
-                'message': str(ex)
-            }
-        }), 400
+        return jsonify({'meta_data': {'message': str(ex)}}), 400
 
 @app.route('/users/<username>', methods=['GET'], strict_slashes=False)
 @app.route("/allure-docker-service/users/<username>", methods=['GET'], strict_slashes=False)
 @jwt_required
 def get_user_endpoint(username):
     try:
-        # Check if current user is admin
         if ADMIN_ROLE_NAME not in current_user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
-
         username = username.lower()
-        if username not in USERS_INFO:
+        user = db_get_user(username)
+        if not user:
             return jsonify({'meta_data': {'message': 'User not found'}}), 404
-
-        user_info = USERS_INFO[username]
         return jsonify({
             'data': {
                 'username': username,
-                'roles': user_info['roles'],
-                'projects': user_info.get('projects', [])
+                'roles': user['roles'],
+                'projects': user['projects']
             },
             'meta_data': {
                 'message': 'User details retrieved successfully'
             }
         }), 200
-
     except Exception as ex:
-        return jsonify({
-            'meta_data': {
-                'message': str(ex)
-            }
-        }), 400
+        return jsonify({'meta_data': {'message': str(ex)}}), 400
 
 @app.route('/users/<username>', methods=['PUT'], strict_slashes=False)
 @app.route("/allure-docker-service/users/<username>", methods=['PUT'], strict_slashes=False)
 @jwt_required
 def update_user_endpoint(username):
     try:
-        # Check if current user is admin
         if ADMIN_ROLE_NAME not in current_user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
-
         if not request.is_json:
             raise Exception("Header 'Content-Type' is not 'application/json'")
-
         username = username.lower()
-        if username not in USERS_INFO:
+        user = db_get_user(username)
+        if not user:
             return jsonify({'meta_data': {'message': 'User not found'}}), 404
-
         data = request.get_json()
-        user_info = USERS_INFO[username]
-
-        # Update password if provided
-        if 'password' in data:
-            user_info['pass'] = data['password']
-
-        # Update roles if provided
-        if 'roles' in data:
-            roles = data['roles']
-            if not all(role == VIEWER_ROLE_NAME for role in roles):
-                raise Exception("Only 'viewer' role is allowed")
-            user_info['roles'] = roles
-
-        # Update projects if provided
-        if 'projects' in data:
-            user_info['projects'] = data['projects']
-
-        save_users_info()
+        password = data.get('password')
+        roles = data.get('roles')
+        projects = data.get('projects')
+        if roles and not all(role == VIEWER_ROLE_NAME for role in roles):
+            raise Exception("Only 'viewer' role is allowed")
+        db_update_user(username, password, roles, projects)
+        user = db_get_user(username)
         return jsonify({
             'data': {
                 'username': username,
-                'roles': user_info['roles'],
-                'projects': user_info.get('projects', [])
+                'roles': user['roles'],
+                'projects': user['projects']
             },
             'meta_data': {
                 'message': 'User updated successfully'
             }
         }), 200
-
     except Exception as ex:
-        return jsonify({
-            'meta_data': {
-                'message': str(ex)
-            }
-        }), 400
+        return jsonify({'meta_data': {'message': str(ex)}}), 400
 
 @app.route('/users/<username>', methods=['DELETE'], strict_slashes=False)
 @app.route("/allure-docker-service/users/<username>", methods=['DELETE'], strict_slashes=False)
 @jwt_required
 def delete_user_endpoint(username):
     try:
-        # Check if current user is admin
         if ADMIN_ROLE_NAME not in current_user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
-
         username = username.lower()
-        if username not in USERS_INFO:
+        user = db_get_user(username)
+        if not user:
             return jsonify({'meta_data': {'message': 'User not found'}}), 404
-
-        # Don't allow deleting the admin user
-        if ADMIN_ROLE_NAME in USERS_INFO[username]['roles']:
+        if ADMIN_ROLE_NAME in user['roles']:
             return jsonify({'meta_data': {'message': 'Cannot delete admin user'}}), 403
-
-        del USERS_INFO[username]
-        save_users_info()
-
-        return jsonify({
-            'meta_data': {
-                'message': 'User deleted successfully'
-            }
-        }), 200
-
+        db_delete_user(username)
+        return jsonify({'meta_data': {'message': 'User deleted successfully'}}), 200
     except Exception as ex:
-        return jsonify({
-            'meta_data': {
-                'message': str(ex)
-            }
-        }), 400
+        return jsonify({'meta_data': {'message': str(ex)}}), 400
 
 @app.route('/users/<username>/projects', methods=['PUT'], strict_slashes=False)
 @app.route("/allure-docker-service/users/<username>/projects", methods=['PUT'], strict_slashes=False)
 @jwt_required
 def update_user_projects_endpoint(username):
     try:
-        # Check if current user is admin
         if ADMIN_ROLE_NAME not in current_user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
-
         if not request.is_json:
             raise Exception("Header 'Content-Type' is not 'application/json'")
-
         username = username.lower()
-        if username not in USERS_INFO:
+        user = db_get_user(username)
+        if not user:
             return jsonify({'meta_data': {'message': 'User not found'}}), 404
-
         data = request.get_json()
         if 'projects' not in data:
             raise Exception("Missing required field: projects")
-
-        # Update user's project permissions
-        USERS_INFO[username]['projects'] = data['projects']
-        save_users_info()
-
+        db_update_user(username, None, None, data['projects'])
+        user = db_get_user(username)
         return jsonify({
             'data': {
                 'username': username,
-                'projects': USERS_INFO[username]['projects']
+                'projects': user['projects']
             },
             'meta_data': {
                 'message': 'User project permissions updated successfully'
             }
         }), 200
-
     except Exception as ex:
-        return jsonify({
-            'meta_data': {
-                'message': str(ex)
-            }
-        }), 400
+        return jsonify({'meta_data': {'message': str(ex)}}), 400
+
+# --- Инициализация базы: создание таблицы users, если её нет ---
+def init_users_db():
+    os.makedirs(USERS_DIRECTORY, exist_ok=True)
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        password_hash TEXT NOT NULL,
+        roles TEXT NOT NULL,
+        projects TEXT NOT NULL
+    )''')
+    conn.commit()
+
+# --- Миграция пользователей из users.json в SQLite ---
+def migrate_users_json_to_db():
+    users_json_path = os.path.join(USERS_DIRECTORY, 'users.json')
+    if os.path.exists(users_json_path):
+        # Проверяем, есть ли пользователи в базе
+        if len(db_list_users()) == 0:
+            try:
+                with open(users_json_path, 'r') as f:
+                    users = json.load(f)
+                for username, info in users.items():
+                    password = info.get('pass')
+                    db_create_user(username, password or '', info['roles'], info.get('projects', []))
+            except Exception as ex:
+                LOGGER.error(f'Failed to migrate users.json to db: {ex}')
+
+# --- Создание SECURITY_USER в базе, если его нет ---
+def ensure_security_user_in_db():
+    if ENABLE_SECURITY_LOGIN and SECURITY_USER and SECURITY_PASS:
+        user = db_get_user(SECURITY_USER)
+        if not user:
+            db_create_user(SECURITY_USER, SECURITY_PASS, [ADMIN_ROLE_NAME], ['*'])
+            LOGGER.info(f'Created SECURITY_USER {SECURITY_USER} in DB')
+
+# --- Вызов инициализации БД до миграции и создания SECURITY_USER ---
+init_users_db()
+migrate_users_json_to_db()
+ensure_security_user_in_db()
 
 if __name__ == '__main__':
     if DEV_MODE == 1:
