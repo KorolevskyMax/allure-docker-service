@@ -618,13 +618,6 @@ def user_loader_callback(jwt_header, jwt_data):
         roles=user['roles']
     )
 
-def check_project_access(user, project_id):
-    if ADMIN_ROLE_NAME in user.roles:
-        return True
-    db_user = db_get_user(user.username)
-    allowed_projects = db_user['projects'] if db_user else []
-    return '*' in allowed_projects or project_id in allowed_projects
-
 ### CORS section
 @app.after_request
 def after_request_func(response):
@@ -1537,7 +1530,8 @@ def get_projects_endpoint():
         else:
             allowed_projects = getattr(current_user, 'projects', None)
             if allowed_projects is None:
-                allowed_projects = USERS_INFO[current_user.username].get('projects', [])
+                db_user = db_get_user(current_user.username)
+                allowed_projects = db_user['projects'] if db_user else []
             if '*' in allowed_projects:
                 allowed_projects = projects_dirs
             else:
@@ -1582,7 +1576,8 @@ def get_projects_search_endpoint():
         else:
             allowed_projects = getattr(current_user, 'projects', None)
             if allowed_projects is None:
-                allowed_projects = USERS_INFO[current_user.username].get('projects', [])
+                db_user = db_get_user(current_user.username)
+                allowed_projects = db_user['projects'] if db_user else []
             if '*' in allowed_projects:
                 allowed_projects = projects_dirs
             else:
@@ -1626,7 +1621,8 @@ def get_reports_endpoint(project_id, path):
         else:
             allowed_projects = getattr(current_user, 'projects', None)
             if allowed_projects is None:
-                allowed_projects = USERS_INFO[current_user.username].get('projects', [])
+                db_user = db_get_user(current_user.username)
+                allowed_projects = db_user['projects'] if db_user else []
             if '*' in allowed_projects:
                 allowed_projects = projects_dirs
             else:
@@ -1990,6 +1986,35 @@ def ensure_security_user_in_db():
 init_users_db()
 migrate_users_json_to_db()
 ensure_security_user_in_db()
+
+def check_project_access(user, project_id):
+    if ADMIN_ROLE_NAME in user.roles:
+        return True
+    db_user = db_get_user(user.username)
+    allowed_projects = db_user['projects'] if db_user else []
+    return '*' in allowed_projects or project_id in allowed_projects
+
+def check_process(process_file, project_id):
+    tmp = os.popen('ps -Af | grep -w {}'.format(project_id)).read()
+    proccount = tmp.count(process_file)
+
+    if proccount > 0:
+        raise Exception("Processing files for project_id '{}'. Try later!".format(project_id))
+    
+def check_admin_access(user):
+    if ENABLE_SECURITY_LOGIN is False:
+        return True
+
+    return check_access(ADMIN_ROLE_NAME, user)
+
+def check_access(role, user):
+    if user.roles is None:
+        return False
+
+    if role in user.roles:
+        return True
+
+    return False
 
 if __name__ == '__main__':
     if DEV_MODE == 1:
