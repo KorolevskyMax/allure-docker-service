@@ -942,9 +942,9 @@ def latest_report_endpoint():
 @jwt_required
 def send_results_endpoint(): #pylint: disable=too-many-branches
     try:
-        if not check_project_access(current_user, project_id):
-            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
-
+        if check_admin_access(current_user) is False:
+            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        
         content_type = str(request.content_type)
         if content_type is None:
             raise Exception("Header 'Content-Type' should start with 'application/json' or 'multipart/form-data'") #pylint: disable=line-too-long
@@ -956,6 +956,9 @@ def send_results_endpoint(): #pylint: disable=too-many-branches
             raise Exception("Header 'Content-Type' should start with 'application/json' or 'multipart/form-data'") #pylint: disable=line-too-long
 
         project_id = resolve_project(request.args.get('project_id'))
+        if not check_project_access(current_user, project_id):
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
+    
         if is_existent_project(project_id) is False:
             if request.args.get('force_project_creation') == 'true':
                 project_id = create_project({ "id": project_id })
@@ -1039,10 +1042,13 @@ def send_results_endpoint(): #pylint: disable=too-many-branches
 @jwt_required
 def generate_report_endpoint():
     try:
+        if check_admin_access(current_user) is False:
+            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        
+        project_id = resolve_project(request.args.get('project_id'))
         if not check_project_access(current_user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
-        project_id = resolve_project(request.args.get('project_id'))
         if is_existent_project(project_id) is False:
             body = {
                 'meta_data': {
@@ -1133,10 +1139,13 @@ def generate_report_endpoint():
 @jwt_required
 def clean_history_endpoint():
     try:
+        if check_admin_access(current_user) is False:
+            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        
+        project_id = resolve_project(request.args.get('project_id'))
         if not check_project_access(current_user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
-        project_id = resolve_project(request.args.get('project_id'))
         if is_existent_project(project_id) is False:
             body = {
                 'meta_data': {
@@ -1175,10 +1184,13 @@ def clean_history_endpoint():
 @jwt_required
 def clean_results_endpoint():
     try:
+        if check_admin_access(current_user) is False:
+            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        
+        project_id = resolve_project(request.args.get('project_id'))
         if not check_project_access(current_user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
-        project_id = resolve_project(request.args.get('project_id'))
         if is_existent_project(project_id) is False:
             body = {
                 'meta_data': {
