@@ -759,6 +759,11 @@ def refresh_endpoint():
         return resp, 404
     try:
         username = get_jwt_identity()
+        
+        user = db_get_user(username)
+        if not user:
+            return jsonify({'meta_data': {'message': 'Invalid jwt refresh token'}}), 401
+
         access_token = create_access_token(identity=username)
         access_token_expires = app.config['JWT_ACCESS_TOKEN_EXPIRES']
         expires_in = access_token_expires.total_seconds() if access_token_expires else 0
@@ -766,7 +771,7 @@ def refresh_endpoint():
             'data': {
                 'access_token': access_token,
                 'expires_in': expires_in,
-                'roles': USERS_INFO[username]['roles']
+                'roles': user['roles']
             },
             'meta_data': {
                 'message' : 'Successfully token obtained'
@@ -774,7 +779,6 @@ def refresh_endpoint():
         }
         resp = jsonify(json_body)
         set_access_cookies(resp, access_token)
-        save_users_info()
         return resp, 200
     except Exception as ex:
         body = {
@@ -1034,7 +1038,6 @@ def send_results_endpoint(): #pylint: disable=too-many-branches
         resp = jsonify(body)
         resp.status_code = 200
 
-    save_users_info()
     return resp
 
 @app.route("/generate-report", strict_slashes=False)
@@ -1131,7 +1134,6 @@ def generate_report_endpoint():
         resp = jsonify(body)
         resp.status_code = 200
 
-    save_users_info()
     return resp
 
 @app.route("/clean-history", strict_slashes=False)
@@ -1176,7 +1178,6 @@ def clean_history_endpoint():
         resp = jsonify(body)
         resp.status_code = 200
 
-    save_users_info()
     return resp
 
 @app.route("/clean-results", strict_slashes=False)
@@ -1222,7 +1223,6 @@ def clean_results_endpoint():
         resp = jsonify(body)
         resp.status_code = 200
 
-    save_users_info()
     return resp
 
 @app.route("/emailable-report/render", strict_slashes=False)
@@ -1457,7 +1457,6 @@ def delete_project_endpoint(project_id):
         }
         resp = jsonify(body)
         resp.status_code = 200
-    save_users_info()
     return resp
 
 @app.route('/projects/<project_id>', strict_slashes=False)
