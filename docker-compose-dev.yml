@@ -1,24 +1,27 @@
-version: '3'
-
 volumes:
   allure-docker-service:
     driver: local
 
 services:
   allure-docker-service:
+    platform: linux/amd64
     build:
       context: ../allure-docker-service
-      dockerfile: docker-custom/Dockerfile.bionic-custom
+      dockerfile: docker/Dockerfile
       args:
-        ALLURE_RELEASE: "2.27.0"
+        ALLURE_RELEASE: 2.35.1
+        BUILD_VERSION: 2.35.1
+        JDK: eclipse-temurin:11-jre-noble
     environment:
       DEV_MODE: 0
       CHECK_RESULTS_EVERY_SECONDS: NONE
       KEEP_HISTORY: 1
       KEEP_HISTORY_LATEST: 5
       #URL_PREFIX: "/my-prefix"
-      SECURITY_USER: "qa_admin"
-      SECURITY_PASS: "password"
+      SECURITY_USER: "my_username"
+      SECURITY_PASS: "my_password"
+      SECURITY_VIEWER_USER: "view_user"
+      SECURITY_VIEWER_PASS: "view_pass"
       SECURITY_ENABLED: 1
       MAKE_VIEWER_ENDPOINTS_PUBLIC: 0
       OPTIMIZE_STORAGE: 0
@@ -28,8 +31,6 @@ services:
       - "${ALLURE_DOCKER_SERVICE_API_PORT}:5050"
     volumes:
       - ./.data/allure-docker-service/allure-results:/app/allure-results
-      - ./.data/allure-docker-service/projects:/app/allure-docker-api/static/projects
-      - ./.data/allure-docker-service/users:/app/allure-docker-api/static/users
 
   allure-ui:
     image: "frankescobar/allure-docker-service-ui"
