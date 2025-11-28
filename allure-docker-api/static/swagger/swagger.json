@@ -973,6 +973,147 @@
                }
             }
          }
+      },
+      "/api-keys":{
+         "post":{
+            "tags":[
+               "User Management"
+            ],
+            "summary":"Create a new API key (admin only)",
+            "description":"Create a new API key for a user. Admins can create keys for any user, regular users can only create keys for themselves.",
+            "security":[
+               {
+                  "bearerAuth":[]
+               }
+            ],
+            "requestBody":{
+               "required":true,
+               "content":{
+                  "application/json":{
+                     "schema":{
+                        "$ref":"#/components/schemas/createApiKey"
+                     },
+                     "example":{
+                        "username":"user1",
+                        "key_name":"My API Key"
+                     }
+                  }
+               }
+            },
+            "responses":{
+               "201":{
+                  "description":"API key created successfully",
+                  "content":{
+                     "application/json":{
+                        "schema":{
+                           "$ref":"#/components/schemas/apiKeyResponse"
+                        }
+                     }
+                  }
+               },
+               "400":{
+                  "description":"Invalid input",
+                  "content":{
+                     "application/json":{
+                        "schema":{
+                           "$ref":"#/components/schemas/errorResponse"
+                        }
+                     }
+                  }
+               },
+               "403":{
+                  "description":"Forbidden - Admin access required"
+               },
+               "404":{
+                  "description":"User not found"
+               }
+            }
+         },
+         "get":{
+            "tags":[
+               "User Management"
+            ],
+            "summary":"List API keys (admin only)",
+            "description":"List all API keys. Admins can see all keys, regular users can only see their own keys.",
+            "security":[
+               {
+                  "bearerAuth":[]
+               }
+            ],
+            "parameters":[
+               {
+                  "name":"username",
+                  "in":"query",
+                  "schema":{
+                     "type":"string"
+                  },
+                  "description":"Filter by username (admin only)"
+               }
+            ],
+            "responses":{
+               "200":{
+                  "description":"List of API keys",
+                  "content":{
+                     "application/json":{
+                        "schema":{
+                           "type":"object",
+                           "properties":{
+                              "data":{
+                                 "type":"object",
+                                 "properties":{
+                                    "api_keys":{
+                                       "type":"array",
+                                       "items":{
+                                          "$ref":"#/components/schemas/apiKeyInfo"
+                                       }
+                                    }
+                                 }
+                              }
+                           }
+                        }
+                     }
+                  }
+               },
+               "403":{
+                  "description":"Forbidden - Admin access required"
+               }
+            }
+         }
+      },
+      "/api-keys/{api_key}":{
+         "delete":{
+            "tags":[
+               "User Management"
+            ],
+            "summary":"Delete API key",
+            "description":"Delete an API key. Admins can delete any key, regular users can only delete their own keys.",
+            "security":[
+               {
+                  "bearerAuth":[]
+               }
+            ],
+            "parameters":[
+               {
+                  "name":"api_key",
+                  "in":"path",
+                  "required":true,
+                  "schema":{
+                     "type":"string"
+                  }
+               }
+            ],
+            "responses":{
+               "200":{
+                  "description":"API key deleted successfully"
+               },
+               "403":{
+                  "description":"Forbidden"
+               },
+               "404":{
+                  "description":"API key not found"
+               }
+            }
+         }
       }
    },
    "components":{
@@ -1147,6 +1288,49 @@
             "properties":{
                "message":{
                   "type":"string"
+               }
+            }
+         },
+         "createApiKey":{
+            "type":"object",
+            "properties":{
+               "username":{
+                  "type":"string",
+                  "description":"Username to create API key for (defaults to current user)"
+               },
+               "key_name":{
+                  "type":"string",
+                  "description":"Optional name for the API key"
+               }
+            }
+         },
+         "apiKeyResponse":{
+            "type":"object",
+            "properties":{
+               "api_key":{
+                  "type":"string",
+                  "description":"The generated API key (only shown once)"
+               },
+               "username":{
+                  "type":"string"
+               },
+               "key_name":{
+                  "type":"string"
+               }
+            }
+         },
+         "apiKeyInfo":{
+            "type":"object",
+            "properties":{
+               "key_name":{
+                  "type":"string"
+               },
+               "username":{
+                  "type":"string"
+               },
+               "created_at":{
+                  "type":"string",
+                  "format":"date-time"
                }
             }
          }

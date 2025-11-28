@@ -17,7 +17,7 @@ import waitress
 from werkzeug.utils import secure_filename
 from flask import (
     Flask, jsonify, render_template, redirect,
-    request, send_file, send_from_directory, make_response, url_for
+    request, send_file, send_from_directory, make_response, url_for, g
 )
 from flask.logging import create_logger
 from flask_swagger_ui import get_swaggerui_blueprint
@@ -227,6 +227,8 @@ def db_update_user(username, password=None, roles=None, projects=None):
 def db_delete_user(username):
     conn = get_db_conn()
     c = conn.cursor()
+    # Удаляем API ключи пользователя (CASCADE должен сработать, но делаем явно для надежности)
+    db_delete_api_keys_by_username(username)
     c.execute('DELETE FROM users WHERE username=?', (username,))
     conn.commit()
 
@@ -248,6 +250,63 @@ def db_check_password(username, password):
     if not user:
         return False
     return check_password_hash(user['password_hash'], password)
+
+# --- Функции работы с API ключами ---
+def db_create_api_key(username, key_name=None):
+    import secrets
+    api_key = secrets.token_urlsafe(32)
+    conn = get_db_conn()
+    c = conn.cursor()
+    key_name = key_name or f"key_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    c.execute('INSERT INTO api_keys (api_key, username, key_name, created_at) VALUES (?, ?, ?, ?)',
+              (api_key, username, key_name, datetime.datetime.now().isoformat()))
+    conn.commit()
+    return api_key
+
+def db_get_api_key(api_key):
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('SELECT api_key, username, key_name, created_at FROM api_keys WHERE api_key=?', (api_key,))
+    row = c.fetchone()
+    if row:
+        return {
+            'api_key': row[0],
+            'username': row[1],
+            'key_name': row[2],
+            'created_at': row[3]
+        }
+    return None
+
+def db_list_api_keys(username=None):
+    conn = get_db_conn()
+    c = conn.cursor()
+    if username:
+        c.execute('SELECT api_key, username, key_name, created_at FROM api_keys WHERE username=?', (username,))
+    else:
+        c.execute('SELECT api_key, username, key_name, created_at FROM api_keys')
+    rows = c.fetchall()
+    return [
+        {
+            'api_key': row[0],
+            'username': row[1],
+            'key_name': row[2],
+            'created_at': row[3]
+        } for row in rows
+    ]
+
+def db_delete_api_key(api_key):
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('DELETE FROM api_keys WHERE api_key=?', (api_key,))
+    conn.commit()
+    return c.rowcount > 0
+
+def db_delete_api_keys_by_username(username):
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute('DELETE FROM api_keys WHERE username=?', (username,))
+    conn.commit()
+    return c.rowcount
 
 def load_users_info():
     global USERS_INFO
@@ -491,29 +550,42 @@ def generate_security_swagger_spec():
             data['paths']['/logout-refresh-token'] = security_specs['logout_refresh_spec.json']
             data['components']['schemas']['login'] = security_specs['login_scheme.json']
 
-            ensure_tags = ['Action', 'Project', 'Users']
+            ensure_tags = ['Action', 'Project', 'Users', 'User Management']
             security_type = security_specs['security_type.json']
             security_401_response = security_specs['security_unauthorized_response.json']
             security_403_response = security_specs['security_forbidden_response.json']
             security_crsf = security_specs['security_csrf.json']
+            security_api_key = security_specs['security_api_key.json']
             for path in data['paths']: #pylint: disable=too-many-nested-blocks
                 for method in data['paths'][path]:
                     if is_endpoint_swagger_protected(method, path):
-                        if set(ensure_tags) & set(data['paths'][path][method]['tags']):
+                        if set(ensure_tags) & set(data['paths'][path][method].get('tags', [])):
+                            # Добавляем security схемы для всех защищенных эндпоинтов (включая GET)
                             data['paths'][path][method]['security'] = security_type
+                            # Убеждаемся, что поле responses существует
+                            if 'responses' not in data['paths'][path][method]:
+                                data['paths'][path][method]['responses'] = {}
                             data['paths'][path][method]['responses']['401'] = security_401_response
                             data['paths'][path][method]['responses']['403'] = security_403_response
-                            if method in ['post', 'put', 'patch', 'delete']:
+                            # CSRF токен добавляем только для модифицирующих операций
+                            if method in ['post', 'put', 'patch', 'delete', 'get']:
                                 if 'parameters' in data['paths'][path][method]:
                                     params = data['paths'][path][method]['parameters']
-                                    params.append(security_crsf)
-                                    data['paths'][path][method]['parameters'] = params
+                                    # Проверяем, нет ли уже CSRF токена в параметрах
+                                    csrf_exists = any(p.get('name') == 'X-CSRF-TOKEN' for p in params)
+                                    if not csrf_exists:
+                                        params.append(security_crsf)
+                                        data['paths'][path][method]['parameters'] = params
+                                    params.append(security_api_key)
+                                    
                                 else:
                                     data['paths'][path][method]['parameters'] = [security_crsf]
-        with open("{}/swagger/swagger_security.json".format(STATIC_CONTENT), 'w') as outfile:
-            json.dump(data, outfile)
+        security_file_path = "{}/swagger/swagger_security.json".format(STATIC_CONTENT)
+        with open(security_file_path, 'w') as outfile:
+            json.dump(data, outfile, indent=3)
+        LOGGER.info('Successfully generated swagger_security.json')
     except Exception as ex:
-        LOGGER.error(str(ex))
+        LOGGER.error(f'Failed to generate swagger_security.json: {ex}', exc_info=True)
 
 ### swagger specific ###
 NATIVE_PREFIX = '/allure-docker-service'
@@ -589,12 +661,75 @@ def revoked_token_loader(jwt_header, jwt_payload):
         }
     }), 401
 
+def get_api_key_from_request():
+    """Извлекает API ключ из заголовка X-API-Key или Authorization"""
+    api_key = request.headers.get('X-API-Key')
+    if not api_key:
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            # Проверяем, не является ли это API ключом (JWT токены обычно длиннее и имеют другую структуру)
+            potential_key = auth_header[7:]
+            # API ключи обычно короче JWT токенов, но для надежности проверим в базе
+            if db_get_api_key(potential_key):
+                api_key = potential_key
+    return api_key
+
+def get_current_user():
+    """Получает текущего пользователя из JWT или API ключа"""
+    if not ENABLE_SECURITY_LOGIN:
+        return None
+    
+    # Проверяем, не установлен ли уже пользователь в g
+    if hasattr(g, 'current_user'):
+        return g.current_user
+    
+    # Сначала пробуем API ключ
+    api_key = get_api_key_from_request()
+    if api_key:
+        key_info = db_get_api_key(api_key)
+        if key_info:
+            user = db_get_user(key_info['username'])
+            if user:
+                user_obj = UserAccess(
+                    username=user['username'],
+                    roles=user['roles']
+                )
+                g.current_user = user_obj
+                return user_obj
+    
+    # Если API ключа нет, пробуем JWT
+    try:
+        verify_jwt_in_request(refresh=False)
+        user_obj = current_user
+        g.current_user = user_obj
+        return user_obj
+    except Exception:
+        return None
+
+def authenticate_user():
+    """Аутентифицирует пользователя через JWT или API ключ (для декоратора)"""
+    return get_current_user()
+
+# Helper для получения current_user (совместимость с существующим кодом)
+def get_user():
+    """Возвращает current_user из g или из flask-jwt-extended"""
+    if hasattr(g, 'current_user'):
+        return g.current_user
+    try:
+        return current_user
+    except RuntimeError:
+        return None
+
 def jwt_required(fn): #pylint: disable=invalid-name, function-redefined
     @wraps(fn)
     def wrapper(*args, **kwargs):
         if ENABLE_SECURITY_LOGIN:
             if is_endpoint_protected(request.endpoint):
-                verify_jwt_in_request(refresh=False)
+                user = authenticate_user()
+                if not user:
+                    return jsonify({'meta_data': {'message': 'Authentication required'}}), 401
+                # Устанавливаем current_user в g для использования в эндпоинтах
+                g.current_user = user
         return fn(*args, **kwargs)
     return wrapper
 
@@ -603,6 +738,7 @@ def jwt_refresh_token_required(fn): #pylint: disable=invalid-name, function-rede
     def wrapper(*args, **kwargs):
         if ENABLE_SECURITY_LOGIN:
             if is_endpoint_protected(request.endpoint):
+                # Refresh token работает только с JWT, не с API ключами
                 verify_jwt_in_request(refresh=True)
         return fn(*args, **kwargs)
     return wrapper
@@ -946,7 +1082,8 @@ def latest_report_endpoint():
 @jwt_required
 def send_results_endpoint(): #pylint: disable=too-many-branches
     try:
-        if check_admin_access(current_user) is False:
+        user = get_user()
+        if check_admin_access(user) is False:
             return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
         
         content_type = str(request.content_type)
@@ -960,7 +1097,7 @@ def send_results_endpoint(): #pylint: disable=too-many-branches
             raise Exception("Header 'Content-Type' should start with 'application/json' or 'multipart/form-data'") #pylint: disable=line-too-long
 
         project_id = resolve_project(request.args.get('project_id'))
-        if not check_project_access(current_user, project_id):
+        if not check_project_access(user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
     
         if is_existent_project(project_id) is False:
@@ -1045,11 +1182,12 @@ def send_results_endpoint(): #pylint: disable=too-many-branches
 @jwt_required
 def generate_report_endpoint():
     try:
-        if check_admin_access(current_user) is False:
+        user = get_user()
+        if check_admin_access(user) is False:
             return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
         
         project_id = resolve_project(request.args.get('project_id'))
-        if not check_project_access(current_user, project_id):
+        if not check_project_access(user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         if is_existent_project(project_id) is False:
@@ -1141,11 +1279,12 @@ def generate_report_endpoint():
 @jwt_required
 def clean_history_endpoint():
     try:
-        if check_admin_access(current_user) is False:
+        user = get_user()
+        if check_admin_access(user) is False:
             return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
         
         project_id = resolve_project(request.args.get('project_id'))
-        if not check_project_access(current_user, project_id):
+        if not check_project_access(user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         if is_existent_project(project_id) is False:
@@ -1185,11 +1324,12 @@ def clean_history_endpoint():
 @jwt_required
 def clean_results_endpoint():
     try:
-        if check_admin_access(current_user) is False:
+        user = get_user()
+        if check_admin_access(user) is False:
             return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
         
         project_id = resolve_project(request.args.get('project_id'))
-        if not check_project_access(current_user, project_id):
+        if not check_project_access(user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         if is_existent_project(project_id) is False:
@@ -1241,7 +1381,8 @@ def emailable_report_render_endpoint():
             resp.status_code = 404
             return resp
 
-        if not check_project_access(current_user, project_id):
+        user = get_user()
+        if not check_project_access(user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         check_process(GENERATE_REPORT_PROCESS, project_id)
@@ -1306,7 +1447,8 @@ def emailable_report_export_endpoint():
             resp.status_code = 404
             return resp
 
-        if not check_project_access(current_user, project_id):
+        user = get_user()
+        if not check_project_access(user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         check_process(GENERATE_REPORT_PROCESS, project_id)
@@ -1345,7 +1487,8 @@ def report_export_endpoint():
             resp.status_code = 404
             return resp
 
-        if not check_project_access(current_user, project_id):
+        user = get_user()
+        if not check_project_access(user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         check_process(GENERATE_REPORT_PROCESS, project_id)
@@ -1387,7 +1530,8 @@ def report_export_endpoint():
 @jwt_required
 def create_project_endpoint():
     try:
-        if ADMIN_ROLE_NAME not in current_user.roles:
+        user = get_user()
+        if ADMIN_ROLE_NAME not in user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
 
         if not request.is_json:
@@ -1420,10 +1564,11 @@ def create_project_endpoint():
 @jwt_required
 def delete_project_endpoint(project_id):
     try:
-        if ADMIN_ROLE_NAME not in current_user.roles:
+        user = get_user()
+        if ADMIN_ROLE_NAME not in user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
 
-        if not check_project_access(current_user, project_id):
+        if not check_project_access(user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         # if project_id == 'default':
@@ -1474,7 +1619,8 @@ def get_project_endpoint(project_id):
             resp.status_code = 404
             return resp
 
-        if not check_project_access(current_user, project_id):
+        user = get_user()
+        if not check_project_access(user, project_id):
             return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
 
         project_reports_path = '{}/reports'.format(get_project_path(project_id))
@@ -1534,14 +1680,15 @@ def get_project_endpoint(project_id):
 @jwt_required
 def get_projects_endpoint():
     try:
+        user = get_user()
         projects_dirs = os.listdir(PROJECTS_DIRECTORY)
         # Проверка доступа
-        if ADMIN_ROLE_NAME in current_user.roles:
+        if ADMIN_ROLE_NAME in user.roles:
             allowed_projects = projects_dirs
         else:
-            allowed_projects = getattr(current_user, 'projects', None)
+            allowed_projects = getattr(user, 'projects', None)
             if allowed_projects is None:
-                db_user = db_get_user(current_user.username)
+                db_user = db_get_user(user.username)
                 allowed_projects = db_user['projects'] if db_user else []
             if '*' in allowed_projects:
                 allowed_projects = projects_dirs
@@ -1575,6 +1722,7 @@ def get_projects_endpoint():
 @jwt_required
 def get_projects_search_endpoint():
     try:
+        user = get_user()
         project_id = request.args.get('id')
         if project_id is None:
             raise Exception("'id' query parameter is required")
@@ -1582,12 +1730,12 @@ def get_projects_search_endpoint():
         project_id = project_id.lower()
         projects_dirs = os.listdir(PROJECTS_DIRECTORY)
         # Проверка доступа
-        if ADMIN_ROLE_NAME in current_user.roles:
+        if ADMIN_ROLE_NAME in user.roles:
             allowed_projects = projects_dirs
         else:
-            allowed_projects = getattr(current_user, 'projects', None)
+            allowed_projects = getattr(user, 'projects', None)
             if allowed_projects is None:
-                db_user = db_get_user(current_user.username)
+                db_user = db_get_user(user.username)
                 allowed_projects = db_user['projects'] if db_user else []
             if '*' in allowed_projects:
                 allowed_projects = projects_dirs
@@ -1626,13 +1774,14 @@ def get_projects_search_endpoint():
 def get_reports_endpoint(project_id, path):
     try:
         # Проверка доступа
+        user = get_user()
         projects_dirs = os.listdir(PROJECTS_DIRECTORY)
-        if ADMIN_ROLE_NAME in current_user.roles:
+        if ADMIN_ROLE_NAME in user.roles:
             allowed_projects = projects_dirs
         else:
-            allowed_projects = getattr(current_user, 'projects', None)
+            allowed_projects = getattr(user, 'projects', None)
             if allowed_projects is None:
-                db_user = db_get_user(current_user.username)
+                db_user = db_get_user(user.username)
                 allowed_projects = db_user['projects'] if db_user else []
             if '*' in allowed_projects:
                 allowed_projects = projects_dirs
@@ -1799,7 +1948,8 @@ def resolve_project(project_id_param):
 @jwt_required
 def create_user_endpoint():
     try:
-        if ADMIN_ROLE_NAME not in current_user.roles:
+        user = get_user()
+        if ADMIN_ROLE_NAME not in user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
         if not request.is_json:
             raise Exception("Header 'Content-Type' is not 'application/json'")
@@ -1837,7 +1987,8 @@ def create_user_endpoint():
 @jwt_required
 def list_users_endpoint():
     try:
-        if ADMIN_ROLE_NAME not in current_user.roles:
+        user = get_user()
+        if ADMIN_ROLE_NAME not in user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
         users = db_list_users()
         return jsonify({
@@ -1856,7 +2007,8 @@ def list_users_endpoint():
 @jwt_required
 def get_user_endpoint(username):
     try:
-        if ADMIN_ROLE_NAME not in current_user.roles:
+        user = get_user()
+        if ADMIN_ROLE_NAME not in user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
         username = username.lower()
         user = db_get_user(username)
@@ -1880,7 +2032,8 @@ def get_user_endpoint(username):
 @jwt_required
 def update_user_endpoint(username):
     try:
-        if ADMIN_ROLE_NAME not in current_user.roles:
+        user = get_user()
+        if ADMIN_ROLE_NAME not in user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
         if not request.is_json:
             raise Exception("Header 'Content-Type' is not 'application/json'")
@@ -1914,7 +2067,8 @@ def update_user_endpoint(username):
 @jwt_required
 def delete_user_endpoint(username):
     try:
-        if ADMIN_ROLE_NAME not in current_user.roles:
+        user = get_user()
+        if ADMIN_ROLE_NAME not in user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
         username = username.lower()
         user = db_get_user(username)
@@ -1932,7 +2086,8 @@ def delete_user_endpoint(username):
 @jwt_required
 def update_user_projects_endpoint(username):
     try:
-        if ADMIN_ROLE_NAME not in current_user.roles:
+        user = get_user()
+        if ADMIN_ROLE_NAME not in user.roles:
             return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
         if not request.is_json:
             raise Exception("Header 'Content-Type' is not 'application/json'")
@@ -1957,6 +2112,102 @@ def update_user_projects_endpoint(username):
     except Exception as ex:
         return jsonify({'meta_data': {'message': str(ex)}}), 400
 
+# --- API Keys Management Endpoints ---
+@app.route('/api-keys', methods=['POST'], strict_slashes=False)
+@app.route("/allure-docker-service/api-keys", methods=['POST'], strict_slashes=False)
+@jwt_required
+def create_api_key_endpoint():
+    try:
+        user = get_user()
+        if ADMIN_ROLE_NAME not in user.roles:
+            return jsonify({'meta_data': {'message': 'Access Forbidden - Admin only'}}), 403
+        
+        if not request.is_json:
+            raise Exception("Header 'Content-Type' is not 'application/json'")
+        
+        data = request.get_json()
+        username = data.get('username', user.username).lower()
+        key_name = data.get('key_name')
+        
+        # Проверяем, что пользователь существует
+        target_user = db_get_user(username)
+        if not target_user:
+            return jsonify({'meta_data': {'message': 'User not found'}}), 404
+        
+        # Админы могут создавать ключи для любого пользователя, остальные - только для себя
+        if ADMIN_ROLE_NAME not in user.roles and username != user.username:
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
+        
+        api_key = db_create_api_key(username, key_name)
+        return jsonify({
+            'data': {
+                'api_key': api_key,
+                'username': username,
+                'key_name': key_name
+            },
+            'meta_data': {
+                'message': 'API key created successfully'
+            }
+        }), 201
+    except Exception as ex:
+        return jsonify({'meta_data': {'message': str(ex)}}), 400
+
+@app.route('/api-keys', methods=['GET'], strict_slashes=False)
+@app.route("/allure-docker-service/api-keys", methods=['GET'], strict_slashes=False)
+@jwt_required
+def list_api_keys_endpoint():
+    try:
+        user = get_user()
+        username = request.args.get('username')
+        
+        # Админы могут видеть все ключи, остальные - только свои
+        if ADMIN_ROLE_NAME not in user.roles:
+            username = user.username
+        
+        if username:
+            username = username.lower()
+        
+        keys = db_list_api_keys(username)
+        # Не возвращаем полный ключ в списке для безопасности
+        keys_list = [
+            {
+                'key_name': k['key_name'],
+                'username': k['username'],
+                'created_at': k['created_at']
+            } for k in keys
+        ]
+        
+        return jsonify({
+            'data': {
+                'api_keys': keys_list
+            },
+            'meta_data': {
+                'message': 'API keys retrieved successfully'
+            }
+        }), 200
+    except Exception as ex:
+        return jsonify({'meta_data': {'message': str(ex)}}), 400
+
+@app.route('/api-keys/<api_key>', methods=['DELETE'], strict_slashes=False)
+@app.route("/allure-docker-service/api-keys/<api_key>", methods=['DELETE'], strict_slashes=False)
+@jwt_required
+def delete_api_key_endpoint(api_key):
+    try:
+        user = get_user()
+        key_info = db_get_api_key(api_key)
+        
+        if not key_info:
+            return jsonify({'meta_data': {'message': 'API key not found'}}), 404
+        
+        # Админы могут удалять любые ключи, остальные - только свои
+        if ADMIN_ROLE_NAME not in user.roles and key_info['username'] != user.username:
+            return jsonify({'meta_data': {'message': 'Access Forbidden'}}), 403
+        
+        db_delete_api_key(api_key)
+        return jsonify({'meta_data': {'message': 'API key deleted successfully'}}), 200
+    except Exception as ex:
+        return jsonify({'meta_data': {'message': str(ex)}}), 400
+
 # --- Инициализация базы: создание таблицы users, если её нет ---
 def init_users_db():
     os.makedirs(USERS_DIRECTORY, exist_ok=True)
@@ -1967,6 +2218,13 @@ def init_users_db():
         password_hash TEXT NOT NULL,
         roles TEXT NOT NULL,
         projects TEXT NOT NULL
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS api_keys (
+        api_key TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        key_name TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
     )''')
     conn.commit()
 

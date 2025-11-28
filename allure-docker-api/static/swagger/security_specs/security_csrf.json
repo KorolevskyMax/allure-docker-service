@@ -1,10 +1,10 @@
 {
    "in":"header",
    "name":"X-CSRF-TOKEN",
-   "description":"csrf_access_token cookie value",
+   "description":"CSRF token from csrf_access_token cookie value. Required when using JWT authentication via cookies. Not required when using API key authentication (X-API-Key header or Authorization: Bearer <api_key>).",
    "schema":{
       "type":"string",
       "format":"uuid"
    },
-   "required":"true"
+   "required":"false"
 }

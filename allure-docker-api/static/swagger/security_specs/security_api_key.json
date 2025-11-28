@@ -1,0 +1,10 @@
+{
+   "in":"header",
+   "name":"X-API-KEY",
+   "description":"X-API-Key header or Authorization: Bearer <api_key>",
+   "schema":{
+      "type":"string",
+      "format":"api_key"
+   },
+   "required":"false"
+}
