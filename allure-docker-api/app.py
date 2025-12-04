@@ -237,6 +237,7 @@ def db_list_users():
     c = conn.cursor()
     c.execute('SELECT username, roles, projects FROM users')
     rows = c.fetchall()
+    LOGGER.info(f'Listed users: {rows}')
     return [
         {
             'username': row[0],
@@ -368,6 +369,8 @@ if "TLS" in os.environ:
         if IS_ITLS == 1:
             URL_SCHEME = 'https'
             app.config['JWT_COOKIE_SECURE'] = True
+            if int(os.environ['DEV_MODE']) == 1:
+                app.config['JWT_COOKIE_SAMESITE'] = 'None'
             LOGGER.info('Enabling TLS=%s', IS_ITLS)
     except Exception as ex:
         LOGGER.error('Wrong env var value. Setting TLS=0 by default')
@@ -800,8 +803,10 @@ def login_endpoint():
         password = request.json.get('password', None)
         if not password:
             raise Exception("Missing 'password' attribute")
-
+        
+        LOGGER.info(f'Logging in user: {username} with password: {password}')
         user = db_get_user(username)
+        LOGGER.info(f'User: {user}')
         if not user or not db_check_password(username, password):
             return jsonify({'meta_data': {'message': 'Invalid username/password'}}), 401
 
@@ -2231,17 +2236,23 @@ def init_users_db():
 # --- Миграция пользователей из users.json в SQLite ---
 def migrate_users_json_to_db():
     users_json_path = os.path.join(USERS_DIRECTORY, 'users.json')
+    LOGGER.info(f'Migrating users.json to db: {users_json_path}')
     if os.path.exists(users_json_path):
+        LOGGER.info(f'Users.json exists: {users_json_path}')
         # Проверяем, есть ли пользователи в базе
         if len(db_list_users()) == 0:
             try:
                 with open(users_json_path, 'r') as f:
                     users = json.load(f)
+                    LOGGER.info(f'Migrating users.json to db: {users}')
                 for username, info in users.items():
                     password = info.get('pass')
                     db_create_user(username, password or '', info['roles'], info.get('projects', []))
+                    LOGGER.info(f'Migrated user: {username} and roles: {info['roles']} and projects: {info.get('projects', [])}')
             except Exception as ex:
                 LOGGER.error(f'Failed to migrate users.json to db: {ex}')
+    else:
+        LOGGER.info(f'Users.json does not exist: {users_json_path}')
 
 # --- Создание SECURITY_USER в базе, если его нет ---
 def ensure_security_user_in_db():
@@ -2252,8 +2263,11 @@ def ensure_security_user_in_db():
             LOGGER.info(f'Created SECURITY_USER {SECURITY_USER} in DB')
 
 # --- Вызов инициализации БД до миграции и создания SECURITY_USER ---
+LOGGER.info('Initializing users db')
 init_users_db()
-migrate_users_json_to_db()
+if int(os.environ['MIGRATE_USERS']) == 1:
+    LOGGER.info('Migrating users.json to db')
+    migrate_users_json_to_db()
 ensure_security_user_in_db()
 
 def check_project_access(user, project_id):
