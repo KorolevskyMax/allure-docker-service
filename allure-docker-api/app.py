@@ -1088,8 +1088,8 @@ def latest_report_endpoint():
 def send_results_endpoint(): #pylint: disable=too-many-branches
     try:
         user = get_user()
-        if check_admin_access(user) is False:
-            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        # if check_admin_access(user) is False:
+            # return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
         
         content_type = str(request.content_type)
         if content_type is None:
