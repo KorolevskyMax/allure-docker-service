@@ -1330,8 +1330,8 @@ def clean_history_endpoint():
 def clean_results_endpoint():
     try:
         user = get_user()
-        if check_admin_access(user) is False:
-            return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
+        # if check_admin_access(user) is False:
+            # return jsonify({ 'meta_data': { 'message': 'Access Forbidden' } }), 403
         
         project_id = resolve_project(request.args.get('project_id'))
         if not check_project_access(user, project_id):
